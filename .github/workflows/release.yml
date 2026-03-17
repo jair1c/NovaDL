@@ -154,7 +154,7 @@ jobs:
 
           Compress-Archive -Path "pkg\NovaDL\*" -DestinationPath $zip -Force
           Write-Host "Portable ZIP: $zip"
-          echo "PORTABLE_ZIP=$zip" >> $env:GITHUB_ENV
+          "PORTABLE_ZIP=$zip" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # ── 9. Instalador Inno Setup ───────────────────────────────────────────
       - name: Build installer
@@ -178,19 +178,33 @@ jobs:
 
           & $iscc "NovaDL.iss"
 
-          $setup = Get-ChildItem "installer\*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if ($setup) {
-            $target = "installer\NovaDL_Setup_v$version.exe"
-            if (Test-Path $target) {
-              Remove-Item $target -Force
-            }
-            Rename-Item $setup.FullName $target -Force
-            Write-Host "Installer: NovaDL_Setup_v$version.exe"
-            echo "INSTALLER_EXE=$target" >> $env:GITHUB_ENV
-          } else {
+          $setup = Get-ChildItem -Path "installer" -Filter "*.exe" |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -First 1
+
+          if (-not $setup) {
             Write-Error "El instalador no se generó"
             exit 1
           }
+
+          $newName = "NovaDL_Setup_v$version.exe"
+          $target  = Join-Path "installer" $newName
+
+          if (Test-Path $target) {
+            Remove-Item $target -Force
+          }
+
+          if ($setup.Name -ne $newName) {
+            Rename-Item -Path $setup.FullName -NewName $newName -Force
+          }
+
+          if (!(Test-Path $target)) {
+            Write-Error "No se pudo renombrar el instalador a $newName"
+            exit 1
+          }
+
+          Write-Host "Installer: $newName"
+          "INSTALLER_EXE=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       # ── 10. Generar release notes ──────────────────────────────────────────
       - name: Generate release notes
@@ -243,10 +257,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name:   ${{ github.ref_name }}
-          name:       "NovaDL ${{ github.ref_name }}"
-          body_path:  RELEASE_NOTES.md
-          draft:      false
+          tag_name: ${{ github.ref_name }}
+          name: "NovaDL ${{ github.ref_name }}"
+          body_path: RELEASE_NOTES.md
+          draft: false
           prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
           files: |
             ${{ env.PORTABLE_ZIP }}
