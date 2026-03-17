@@ -1,0 +1,193 @@
+# .github/workflows/release.yml
+#
+# Se activa cuando haces push de un tag v*.*.*
+#   git tag v1.1.0
+#   git push origin v1.1.0
+#
+# Publica en el mismo release:
+#   · NovaDL_Portable_vX.X.X.zip
+#   · NovaDL_Setup_vX.X.X.exe  (via Inno Setup)
+
+name: Build & Release Windows
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Código ──────────────────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python ──────────────────────────────────────────────────────────
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      # ── 3. Dependencias ────────────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install customtkinter pillow requests pyinstaller psutil
+          pip install plyer win10toast
+          pip install tkinterdnd2 || echo "tkinterdnd2 no disponible"
+
+      # ── 4. Inno Setup ──────────────────────────────────────────────────────
+      - name: Install Inno Setup
+        run: |
+          choco install innosetup --yes --no-progress
+        shell: pwsh
+
+      # ── 5. Compilar PyInstaller ────────────────────────────────────────────
+      - name: Build executable
+        run: |
+          pyinstaller `
+            --noconfirm `
+            --onefile `
+            --windowed `
+            --icon assets/icon.ico `
+            --name NovaDL `
+            --add-data "core;core" `
+            --add-data "ui;ui" `
+            --add-data "assets;assets" `
+            --hidden-import psutil `
+            --hidden-import PIL `
+            --hidden-import PIL.Image `
+            --hidden-import PIL.ImageDraw `
+            main.py
+        shell: pwsh
+
+      # ── 6. Verificar .exe ──────────────────────────────────────────────────
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (!(Test-Path "dist\NovaDL.exe")) {
+            Write-Error "dist\NovaDL.exe no encontrado"
+            exit 1
+          }
+          $mb = [math]::Round((Get-Item "dist\NovaDL.exe").Length / 1MB, 1)
+          Write-Host "NovaDL.exe OK ($mb MB)"
+
+      # ── 7. Copiar bin ──────────────────────────────────────────────────────
+      - name: Prepare bin folder
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "dist\bin" | Out-Null
+          # bin/ vacío en CI — el usuario los pone manualmente
+          Set-Content "dist\bin\COLOCA_AQUI_YTDLP_Y_FFMPEG.txt" `
+            "Descarga yt-dlp.exe y ffmpeg.exe y colocalos en esta carpeta."
+
+      # ── 8. Portable ZIP ────────────────────────────────────────────────────
+      - name: Package portable ZIP
+        shell: pwsh
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $zip     = "NovaDL_Portable_v$version.zip"
+
+          New-Item -ItemType Directory -Force -Path "pkg\NovaDL" | Out-Null
+          Copy-Item "dist\NovaDL.exe"   "pkg\NovaDL\NovaDL.exe"
+          Copy-Item "dist\bin"          "pkg\NovaDL\bin" -Recurse
+          if (Test-Path "README.md") { Copy-Item "README.md" "pkg\NovaDL\" }
+
+          Compress-Archive -Path "pkg\NovaDL" -DestinationPath $zip -Force
+          Write-Host "Portable ZIP: $zip"
+          echo "PORTABLE_ZIP=$zip" >> $env:GITHUB_ENV
+
+      # ── 9. Instalador Inno Setup ───────────────────────────────────────────
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+
+          # Parchear versión en el .iss dinámicamente
+          $iss = Get-Content "NovaDL.iss" -Raw
+          # Inno Setup leerá la versión del .exe directamente con GetFileVersion()
+
+          New-Item -ItemType Directory -Force -Path "installer" | Out-Null
+
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          & $iscc "NovaDL.iss"
+
+          # Renombrar con versión exacta si el nombre difiere
+          $setup = Get-ChildItem "installer\*.exe" | Select-Object -First 1
+          if ($setup) {
+            $target = "installer\NovaDL_Setup_v$version.exe"
+            if ($setup.FullName -ne (Resolve-Path $target -ErrorAction SilentlyContinue)) {
+              Rename-Item $setup.FullName $target -ErrorAction SilentlyContinue
+            }
+            Write-Host "Installer: NovaDL_Setup_v$version.exe"
+            echo "INSTALLER_EXE=installer\NovaDL_Setup_v$version.exe" >> $env:GITHUB_ENV
+          } else {
+            Write-Warning "El instalador no se generó"
+            echo "INSTALLER_EXE=" >> $env:GITHUB_ENV
+          }
+
+      # ── 10. Generar release notes ──────────────────────────────────────────
+      - name: Generate release notes
+        shell: pwsh
+        run: |
+          $tag     = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          $date    = (Get-Date).ToString("yyyy-MM-dd")
+
+          $notes = @"
+          ## NovaDL $version — $date
+
+          ### Descarga
+          | Archivo | Descripción |
+          |---------|-------------|
+          | ``NovaDL_Setup_v$version.exe`` | **Instalador** — recomendado para la mayoría de usuarios |
+          | ``NovaDL_Portable_v$version.zip`` | **Portable** — extrae y ejecuta, sin instalar |
+
+          ### Instalador
+          - Instala en ``C:\Program Files\NovaDL\``
+          - Crea acceso directo en escritorio y menú inicio (opcional)
+          - Inicio automático con Windows (opcional)
+          - Asociación de archivos ``.txt`` de enlaces (opcional)
+          - Desinstalación limpia desde "Agregar o quitar programas"
+
+          ### Portable
+          - Extrae el ZIP y ejecuta ``NovaDL\NovaDL.exe``
+          - Coloca ``yt-dlp.exe`` y ``ffmpeg.exe`` en la carpeta ``bin\``
+
+          ### Requisitos
+          - Windows 10 / 11 (x64)
+          - yt-dlp: https://github.com/yt-dlp/yt-dlp/releases/latest
+          - ffmpeg: https://www.gyan.dev/ffmpeg/builds/
+
+          ---
+          *Build generado automáticamente por GitHub Actions*
+          "@
+
+          # Quitar indentación del heredoc
+          $lines = $notes -split "`n"
+          $clean = ($lines | ForEach-Object { $_.TrimStart() }) -join "`n"
+          Set-Content "RELEASE_NOTES.md" $clean
+          Write-Host "Release notes generadas"
+
+      # ── 11. Publicar release ───────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       "NovaDL ${{ github.ref_name }}"
+          body_path:  RELEASE_NOTES.md
+          draft:      false
+          prerelease: ${{ contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
+          files: |
+            ${{ env.PORTABLE_ZIP }}
+            ${{ env.INSTALLER_EXE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

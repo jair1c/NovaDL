@@ -1,0 +1,12 @@
+bin/ 
+dist/ 
+build/ 
+installer/ 
+pkg/ 
+__pycache__/ 
+*.spec 
+*.pyc 
+.novadl/ 
+.vscode/ 
+Thumbs.db 
+desktop.ini 
