@@ -36,20 +36,22 @@ jobs:
 
       # ── 3. Dependencias ────────────────────────────────────────────────────
       - name: Install dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install customtkinter pillow requests pyinstaller psutil
           pip install plyer win10toast
-          pip install tkinterdnd2 || echo "tkinterdnd2 no disponible"
+          pip install tkinterdnd2
 
       # ── 4. Inno Setup ──────────────────────────────────────────────────────
       - name: Install Inno Setup
+        shell: pwsh
         run: |
           choco install innosetup --yes --no-progress
-        shell: pwsh
 
       # ── 5. Compilar PyInstaller ────────────────────────────────────────────
       - name: Build executable
+        shell: pwsh
         run: |
           pyinstaller `
             --noconfirm `
@@ -65,7 +67,6 @@ jobs:
             --hidden-import PIL.Image `
             --hidden-import PIL.ImageDraw `
             main.py
-        shell: pwsh
 
       # ── 6. Verificar .exe ──────────────────────────────────────────────────
       - name: Verify executable
@@ -78,14 +79,57 @@ jobs:
           $mb = [math]::Round((Get-Item "dist\NovaDL.exe").Length / 1MB, 1)
           Write-Host "NovaDL.exe OK ($mb MB)"
 
-      # ── 7. Copiar bin ──────────────────────────────────────────────────────
+      # ── 7. Preparar bin y descargar yt-dlp / ffmpeg ───────────────────────
       - name: Prepare bin folder
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "dist\bin" | Out-Null
-          # bin/ vacío en CI — el usuario los pone manualmente
-          Set-Content "dist\bin\COLOCA_AQUI_YTDLP_Y_FFMPEG.txt" `
-            "Descarga yt-dlp.exe y ffmpeg.exe y colocalos en esta carpeta."
+
+      - name: Download yt-dlp
+        shell: pwsh
+        run: |
+          Invoke-WebRequest `
+            -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" `
+            -OutFile "dist\bin\yt-dlp.exe"
+
+          if (!(Test-Path "dist\bin\yt-dlp.exe")) {
+            Write-Error "No se pudo descargar yt-dlp.exe"
+            exit 1
+          }
+
+      - name: Download FFmpeg
+        shell: pwsh
+        run: |
+          $zip = "$env:RUNNER_TEMP\ffmpeg.zip"
+          $extract = "$env:RUNNER_TEMP\ffmpeg_extract"
+
+          Invoke-WebRequest `
+            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
+            -OutFile $zip
+
+          Expand-Archive -Path $zip -DestinationPath $extract -Force
+
+          $binPath = Get-ChildItem -Path $extract -Directory -Recurse |
+            Where-Object { $_.Name -eq "bin" } |
+            Select-Object -First 1 -ExpandProperty FullName
+
+          if (-not $binPath) {
+            Write-Error "No se encontró la carpeta bin de FFmpeg"
+            exit 1
+          }
+
+          Copy-Item "$binPath\ffmpeg.exe"  "dist\bin\ffmpeg.exe"  -Force
+          Copy-Item "$binPath\ffplay.exe"  "dist\bin\ffplay.exe"  -Force
+          Copy-Item "$binPath\ffprobe.exe" "dist\bin\ffprobe.exe" -Force
+
+          if (!(Test-Path "dist\bin\ffmpeg.exe"))  { Write-Error "ffmpeg.exe no encontrado"; exit 1 }
+          if (!(Test-Path "dist\bin\ffplay.exe"))  { Write-Error "ffplay.exe no encontrado"; exit 1 }
+          if (!(Test-Path "dist\bin\ffprobe.exe")) { Write-Error "ffprobe.exe no encontrado"; exit 1 }
+
+      - name: Verify bin tools
+        shell: pwsh
+        run: |
+          Get-ChildItem "dist\bin" | Select-Object Name, Length
 
       # ── 8. Portable ZIP ────────────────────────────────────────────────────
       - name: Package portable ZIP
@@ -95,12 +139,20 @@ jobs:
           $version = $tag.TrimStart("v")
           $zip     = "NovaDL_Portable_v$version.zip"
 
-          New-Item -ItemType Directory -Force -Path "pkg\NovaDL" | Out-Null
-          Copy-Item "dist\NovaDL.exe"   "pkg\NovaDL\NovaDL.exe"
-          Copy-Item "dist\bin"          "pkg\NovaDL\bin" -Recurse
-          if (Test-Path "README.md") { Copy-Item "README.md" "pkg\NovaDL\" }
+          if (Test-Path "pkg") {
+            Remove-Item "pkg" -Recurse -Force
+          }
 
-          Compress-Archive -Path "pkg\NovaDL" -DestinationPath $zip -Force
+          New-Item -ItemType Directory -Force -Path "pkg\NovaDL" | Out-Null
+          Copy-Item "dist\NovaDL.exe" "pkg\NovaDL\NovaDL.exe" -Force
+          Copy-Item "dist\bin" "pkg\NovaDL\bin" -Recurse -Force
+          if (Test-Path "README.md") { Copy-Item "README.md" "pkg\NovaDL\" -Force }
+
+          if (Test-Path $zip) {
+            Remove-Item $zip -Force
+          }
+
+          Compress-Archive -Path "pkg\NovaDL\*" -DestinationPath $zip -Force
           Write-Host "Portable ZIP: $zip"
           echo "PORTABLE_ZIP=$zip" >> $env:GITHUB_ENV
 
@@ -111,27 +163,33 @@ jobs:
           $tag     = "${{ github.ref_name }}"
           $version = $tag.TrimStart("v")
 
-          # Parchear versión en el .iss dinámicamente
-          $iss = Get-Content "NovaDL.iss" -Raw
-          # Inno Setup leerá la versión del .exe directamente con GetFileVersion()
+          if (!(Test-Path "NovaDL.iss")) {
+            Write-Error "NovaDL.iss no encontrado"
+            exit 1
+          }
 
           New-Item -ItemType Directory -Force -Path "installer" | Out-Null
 
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            Write-Error "ISCC.exe no encontrado"
+            exit 1
+          }
+
           & $iscc "NovaDL.iss"
 
-          # Renombrar con versión exacta si el nombre difiere
-          $setup = Get-ChildItem "installer\*.exe" | Select-Object -First 1
+          $setup = Get-ChildItem "installer\*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if ($setup) {
             $target = "installer\NovaDL_Setup_v$version.exe"
-            if ($setup.FullName -ne (Resolve-Path $target -ErrorAction SilentlyContinue)) {
-              Rename-Item $setup.FullName $target -ErrorAction SilentlyContinue
+            if (Test-Path $target) {
+              Remove-Item $target -Force
             }
+            Rename-Item $setup.FullName $target -Force
             Write-Host "Installer: NovaDL_Setup_v$version.exe"
-            echo "INSTALLER_EXE=installer\NovaDL_Setup_v$version.exe" >> $env:GITHUB_ENV
+            echo "INSTALLER_EXE=$target" >> $env:GITHUB_ENV
           } else {
-            Write-Warning "El instalador no se generó"
-            echo "INSTALLER_EXE=" >> $env:GITHUB_ENV
+            Write-Error "El instalador no se generó"
+            exit 1
           }
 
       # ── 10. Generar release notes ──────────────────────────────────────────
@@ -151,6 +209,13 @@ jobs:
           | ``NovaDL_Setup_v$version.exe`` | **Instalador** — recomendado para la mayoría de usuarios |
           | ``NovaDL_Portable_v$version.zip`` | **Portable** — extrae y ejecuta, sin instalar |
 
+          ### Incluye
+          - ``NovaDL.exe``
+          - ``yt-dlp.exe``
+          - ``ffmpeg.exe``
+          - ``ffplay.exe``
+          - ``ffprobe.exe``
+
           ### Instalador
           - Instala en ``C:\Program Files\NovaDL\``
           - Crea acceso directo en escritorio y menú inicio (opcional)
@@ -159,19 +224,16 @@ jobs:
           - Desinstalación limpia desde "Agregar o quitar programas"
 
           ### Portable
-          - Extrae el ZIP y ejecuta ``NovaDL\NovaDL.exe``
-          - Coloca ``yt-dlp.exe`` y ``ffmpeg.exe`` en la carpeta ``bin\``
+          - Extrae el ZIP y ejecuta ``NovaDL.exe``
+          - Las herramientas necesarias ya vienen incluidas en ``bin\``
 
           ### Requisitos
           - Windows 10 / 11 (x64)
-          - yt-dlp: https://github.com/yt-dlp/yt-dlp/releases/latest
-          - ffmpeg: https://www.gyan.dev/ffmpeg/builds/
 
           ---
           *Build generado automáticamente por GitHub Actions*
           "@
 
-          # Quitar indentación del heredoc
           $lines = $notes -split "`n"
           $clean = ($lines | ForEach-Object { $_.TrimStart() }) -join "`n"
           Set-Content "RELEASE_NOTES.md" $clean
@@ -191,3 +253,4 @@ jobs:
             ${{ env.INSTALLER_EXE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
